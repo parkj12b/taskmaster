@@ -1,0 +1,10 @@
+programs:
+  dummy_loop:
+    cmd: "/home/jacob/42/taskmaster/tests/dummy_program.sh"
+    autostart: true
+    autorestart: always
+    stdout: "/tmp/taskmaster_dummy.out"
+    stderr: "/tmp/taskmaster_dummy.err"
+    env:
+      DUMMY_NAME: "dummy_loop"
+      DUMMY_INTERVAL: 1

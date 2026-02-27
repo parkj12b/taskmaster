@@ -215,6 +215,31 @@ EOF
     stop_daemon
 }
 
+test_env_does_not_swallow_sibling_program() {
+    cat > "$ROOT_DIR/tests/tmp_env_multi.yaml" <<EOF
+programs:
+  env_prog:
+    cmd: "/usr/bin/env"
+    autostart: true
+    stdout: "$ROOT_DIR/tests/tmp_env_multi.out"
+    env:
+      MULTI_ENV: "yes"
+  sibling:
+    cmd: "/bin/sleep 30"
+    autostart: false
+EOF
+
+    start_daemon "$ROOT_DIR/tests/tmp_env_multi.yaml"
+    sleep 1
+
+    local status_out
+    status_out="$("$ROOT_DIR/taskmasterctl" status)"
+    assert_grep "^env_prog" <(echo "$status_out") "env program parsed"
+    assert_grep "^sibling" <(echo "$status_out") "sibling program after env block parsed"
+    assert_grep "MULTI_ENV=yes" "$ROOT_DIR/tests/tmp_env_multi.out" "env value applied in multi-program config"
+    stop_daemon
+}
+
 test_restart_policy_always_and_retries() {
     cat > "$ROOT_DIR/tests/tmp_restart.yaml" <<EOF
 programs:
@@ -254,6 +279,8 @@ final_cleanup() {
           "$ROOT_DIR/tests/tmp_cfg_probe.yaml" \
           "$ROOT_DIR/tests/tmp_multi.yaml" \
           "$ROOT_DIR/tests/tmp_starttime.yaml" \
+          "$ROOT_DIR/tests/tmp_env_multi.yaml" \
+          "$ROOT_DIR/tests/tmp_env_multi.out" \
           "$ROOT_DIR/tests/tmp_restart.yaml" \
           /tmp/test_exitcodes.out
     rm -rf "$ROOT_DIR/tests/tmp_cfg_probe"
@@ -265,6 +292,7 @@ build_helpers
 test_parser_and_application
 test_numprocs_autostart_and_stopsignal
 test_starttime_transition
+test_env_does_not_swallow_sibling_program
 test_restart_policy_always_and_retries
 test_exitcodes_unexpected_policy
 

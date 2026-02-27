@@ -1,0 +1,8 @@
+programs:
+  stable:
+    cmd: "/home/jacob/42/taskmaster/tests/dummy_program.sh"
+    autostart: true
+    autorestart: never
+    starttime: 5
+    stdout: "/tmp/reload_stable.out"
+    stderr: "/tmp/reload_stable.err"

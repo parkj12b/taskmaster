@@ -44,6 +44,7 @@ void parse_config(const char *path, Taskmaster *tm) {
     while (fgets(line, sizeof(line), file)) {
         line_num++;
         char *trimmed = trim_whitespace(line);
+        int current_indent = (int)(trimmed - line);
         if (trimmed[0] == '#' || trimmed[0] == '\0') continue;
 
         if (strncmp(trimmed, "programs:", 9) == 0) continue;
@@ -122,27 +123,23 @@ void parse_config(const char *path, Taskmaster *tm) {
                             else log_event("Config warning in %s at line %d: unknown autorestart policy '%s'", path, line_num, value);
                         }
                     } else if (strcmp(key, "env") == 0) {
-                        const char *props[] = {"cmd", "numprocs", "umask", "workingdir", "autostart", 
-                                               "autorestart", "exitcodes", "startretries", "starttime", 
-                                               "stopsignal", "stoptime", "stdout", "stderr", "env", "user", NULL};
                         long pos = ftell(file);
                         char next_line[MAX_CMD_LEN];
                         while (fgets(next_line, sizeof(next_line), file)) {
                             line_num++;
                             char *trimmed_next = trim_whitespace(next_line);
-                            if (trimmed_next[0] != '\0' && (next_line[0] == ' ' || next_line[0] == '\t') && strchr(trimmed_next, ':')) {
+                            int next_indent = (int)(trimmed_next - next_line);
+                            if (trimmed_next[0] == '\0') {
+                                pos = ftell(file);
+                                continue;
+                            }
+                            if (next_indent <= current_indent) {
+                                fseek(file, pos, SEEK_SET);
+                                line_num--;
+                                break;
+                            }
+                            if (strchr(trimmed_next, ':')) {
                                 char *ekey = strtok(trimmed_next, ":");
-                                
-                                // Check if this is actually another property
-                                bool is_real_prop = false;
-                                for (int i = 0; props[i]; i++) {
-                                    if (strcmp(ekey, props[i]) == 0) { is_real_prop = true; break; }
-                                }
-                                if (is_real_prop) {
-                                    fseek(file, pos, SEEK_SET);
-                                    line_num--;
-                                    break;
-                                }
 
                                 if (current_config->num_env < MAX_ENV_VARS) {
                                     char *evalue = strtok(NULL, "");
@@ -160,9 +157,6 @@ void parse_config(const char *path, Taskmaster *tm) {
                                     current_config->env[current_config->num_env++] = strdup(env_buf);
                                 }
                                 pos = ftell(file);
-                            } else if (trimmed_next[0] == '\0') {
-                                pos = ftell(file);
-                                continue;
                             } else {
                                 fseek(file, pos, SEEK_SET);
                                 line_num--;
@@ -175,15 +169,22 @@ void parse_config(const char *path, Taskmaster *tm) {
                         while (fgets(next_line, sizeof(next_line), file)) {
                             line_num++;
                             char *trimmed_next = trim_whitespace(next_line);
-                            if (trimmed_next[0] == '-' && (next_line[0] == ' ' || next_line[0] == '\t')) {
+                            int next_indent = (int)(trimmed_next - next_line);
+                            if (trimmed_next[0] == '\0') {
+                                pos = ftell(file);
+                                continue;
+                            }
+                            if (next_indent <= current_indent) {
+                                fseek(file, pos, SEEK_SET);
+                                line_num--;
+                                break;
+                            }
+                            if (trimmed_next[0] == '-') {
                                 char *val = trim_whitespace(trimmed_next + 1);
                                 if (val && current_config->num_exitcodes < MAX_EXIT_CODES) {
                                     current_config->exitcodes[current_config->num_exitcodes++] = atoi(val);
                                 }
                                 pos = ftell(file);
-                            } else if (trimmed_next[0] == '\0') {
-                                pos = ftell(file);
-                                continue;
                             } else {
                                 fseek(file, pos, SEEK_SET);
                                 line_num--;
@@ -248,11 +249,29 @@ static bool configs_equal(ProgramConfig *a, ProgramConfig *b) {
     if (a->stoptime != b->stoptime) return false;
     if (strcmp(a->stdout_path, b->stdout_path) != 0) return false;
     if (strcmp(a->stderr_path, b->stderr_path) != 0) return false;
+    if (strcmp(a->user, b->user) != 0) return false;
     if (a->num_exitcodes != b->num_exitcodes) return false;
     for (int i = 0; i < a->num_exitcodes; i++) {
         if (a->exitcodes[i] != b->exitcodes[i]) return false;
     }
+    if (a->num_env != b->num_env) return false;
+    for (int i = 0; i < a->num_env; i++) {
+        if (strcmp(a->env[i], b->env[i]) != 0) return false;
+    }
     return true;
+}
+
+static int find_config_index(ProgramConfig *configs, int num_configs, const char *name) {
+    for (int i = 0; i < num_configs; i++) {
+        if (strcmp(configs[i].name, name) == 0) return i;
+    }
+    return -1;
+}
+
+static int total_processes_for_configs(ProgramConfig *configs, int num_configs) {
+    int total = 0;
+    for (int i = 0; i < num_configs; i++) total += configs[i].numprocs;
+    return total;
 }
 
 void reload_config(Taskmaster *tm, const char *config_path) {
@@ -268,70 +287,95 @@ void reload_config(Taskmaster *tm, const char *config_path) {
 
     log_event("Reloading configuration from %s", config_path);
 
-    // Stop programs removed or changed
-    for (int i = 0; i < tm->num_configs; i++) {
-        bool changed = false;
-        bool found = false;
-        for (int j = 0; j < next_tm.num_configs; j++) {
-            if (strcmp(tm->configs[i].name, next_tm.configs[j].name) == 0) {
-                found = true;
-                if (!configs_equal(&tm->configs[i], &next_tm.configs[j])) {
-                    changed = true;
-                }
-                break;
-            }
-        }
-        if (!found || changed) {
-            log_event("Program %s changed or removed, stopping processes", tm->configs[i].name);
-            for (int k = 0; k < tm->num_processes; k++) {
-                if (tm->processes[k].config == &tm->configs[i]) {
-                    stop_process(&tm->processes[k]);
-                }
-            }
-        }
-    }
-
-    // Critical: Remap process configuration pointers to the new configuration array
     ProgramConfig *old_configs = tm->configs;
-    tm->configs = next_tm.configs;
     int old_num_configs = tm->num_configs;
+    Process *old_processes = tm->processes;
+    int old_num_processes = tm->num_processes;
+    int new_num_processes = total_processes_for_configs(next_tm.configs, next_tm.num_configs);
+
+    Process *new_processes = NULL;
+    bool *old_used = NULL;
+    bool *preserved = NULL;
+
+    if (new_num_processes > 0) {
+        new_processes = calloc(new_num_processes, sizeof(Process));
+        preserved = calloc(new_num_processes, sizeof(bool));
+    }
+    if (old_num_processes > 0) old_used = calloc(old_num_processes, sizeof(bool));
+
+    if ((new_num_processes > 0 && (!new_processes || !preserved)) ||
+        (old_num_processes > 0 && !old_used)) {
+        log_event("Reload failed: memory allocation failure");
+        free(new_processes);
+        free(preserved);
+        free(old_used);
+        free(next_tm.configs);
+        return;
+    }
+
+    int dst_index = 0;
+    for (int i = 0; i < next_tm.num_configs; i++) {
+        int old_cfg_idx = find_config_index(old_configs, old_num_configs, next_tm.configs[i].name);
+        bool unchanged = false;
+        if (old_cfg_idx >= 0) {
+            unchanged = configs_equal(&old_configs[old_cfg_idx], &next_tm.configs[i]);
+        }
+
+        for (int inst = 0; inst < next_tm.configs[i].numprocs; inst++) {
+            Process *dst = &new_processes[dst_index];
+            if (unchanged) {
+                for (int j = 0; j < old_num_processes; j++) {
+                    if (old_used[j]) continue;
+                    if (old_processes[j].config == &old_configs[old_cfg_idx] &&
+                        old_processes[j].proc_index == inst) {
+                        *dst = old_processes[j];
+                        dst->config = &next_tm.configs[i];
+                        old_used[j] = true;
+                        preserved[dst_index] = true;
+                        break;
+                    }
+                }
+            }
+            if (!preserved[dst_index]) {
+                dst->config = &next_tm.configs[i];
+                dst->proc_index = inst;
+                dst->state = STATE_STOPPED;
+            }
+            dst_index++;
+        }
+    }
+
+    // Stop processes that are no longer represented in the new config
+    for (int i = 0; i < old_num_processes; i++) {
+        if (old_used[i]) continue;
+        if (old_processes[i].pid > 0) {
+            log_event("Stopping outdated process %s[%d] during reload",
+                      old_processes[i].config->name, old_processes[i].proc_index);
+            stop_process(&old_processes[i]);
+        }
+    }
+
+    // Swap process/config tables
+    tm->configs = next_tm.configs;
     tm->num_configs = next_tm.num_configs;
+    tm->processes = new_processes;
+    tm->num_processes = new_num_processes;
 
+    // Autostart new/changed process instances
     for (int i = 0; i < tm->num_processes; i++) {
-        Process *proc = &tm->processes[i];
-        bool remapped = false;
-        for (int j = 0; j < tm->num_configs; j++) {
-            // Match by name and check if it's the same instance (index)
-            // This is a heuristic; robust remapping would use a stable unique ID
-            if (strcmp(proc->config->name, tm->configs[j].name) == 0) {
-                proc->config = &tm->configs[j];
-                remapped = true;
-                break;
-            }
-        }
-        if (!remapped) {
-            // Process's program was removed, it's already stopping or stopped
-            // We'll keep the old pointer for now but robust code would handle this better
+        if (preserved[i]) continue;
+        if (tm->processes[i].config->autostart) {
+            log_event("Starting process %s[%d] due to reload",
+                      tm->processes[i].config->name, tm->processes[i].proc_index);
+            start_process(&tm->processes[i]);
         }
     }
 
-    // Start new programs
-    for (int i = 0; i < tm->num_configs; i++) {
-        bool is_new = true;
-        for (int j = 0; j < old_num_configs; j++) {
-            if (strcmp(tm->configs[i].name, old_configs[j].name) == 0) {
-                is_new = false;
-                break;
-            }
-        }
-        if (is_new && tm->configs[i].autostart) {
-            log_event("Starting new program: %s", tm->configs[i].name);
-            // This would require expanding the tm->processes array
-            // Simplified for now: user needs to restart to see new programs or we need dynamic allocation
-        }
-    }
+    log_event("Reload complete (applied %d programs, %d process slots)",
+              tm->num_configs, tm->num_processes);
 
-    log_event("Reload complete (New config applied)");
+    free(old_used);
+    free(preserved);
+    free(old_processes);
     free(old_configs);
 }
-
