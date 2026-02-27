@@ -1,0 +1,4 @@
+programs:
+  ls_test:
+    cmd: "ls"
+    autostart: true

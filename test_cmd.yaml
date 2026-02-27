@@ -1,0 +1,4 @@
+programs:
+  sleeper:
+    cmd: "sleep 100"
+    autostart: false
