@@ -1,0 +1,26 @@
+programs:
+  ls_test:
+    cmd: "ls"
+    numprocs: 1
+    umask: 022
+    workingdir: "/home/jacob/42/taskmaster"
+    autostart: true
+    autorestart: unexpected
+    exitcodes:
+      - 0
+    startretries: 3
+    starttime: 5
+    stopsignal: TERM
+    stoptime: 10
+    stdout: "/tmp/ls.stdout"
+    stderr: "/tmp/ls.stderr"
+
+  sleep_test:
+    cmd: "sleep 100"
+    numprocs: 2
+    autostart: true
+    autorestart: always
+    startretries: 5
+    starttime: 2
+    stopsignal: INT
+    stoptime: 5
